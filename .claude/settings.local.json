@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p C:/Users/Win/fon_hackathon/.claude/ARCHITECTURE)",
+      "Bash(mkdir -p C:/Users/Win/fon_hackathon/.claude/RESEARCH)",
+      "Bash(npx skills:*)",
+      "Bash(npx -y @lobehub/market-cli skills install lukasedv-skills-install-skills --agent claude-code)",
+      "WebFetch(domain:lobehub.com)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/lukasedv/skills-install-skills/main/SKILL.md\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/lukasedv/install-skills/main/SKILL.md\")",
+      "Bash(gh search:*)",
+      "Bash(curl -sL https://api.github.com/search/repositories?q=lukasedv+skills+install)",
+      "Bash(curl -sL https://api.github.com/search/repositories?q=install-skills+user:lukasedv)",
+      "Bash(curl -sL https://api.github.com/users/lukasedv/repos?per_page=50)",
+      "Bash(curl -sL https://api.github.com/users/Lukasedv/repos?per_page=100)",
+      "Bash(curl -sL https://api.github.com/repos/Lukasedv/skills/contents/)",
+      "Bash(curl -sL https://api.github.com/repos/Lukasedv/skills/contents/install-skills)",
+      "Bash(curl:*)",
+      "Bash(bash C:/Users/Win/fon_hackathon/.claude/SKILLS/install-skills/scripts/list-skills.sh anthropics/skills)",
+      "Bash(bash C:/Users/Win/fon_hackathon/.claude/SKILLS/install-skills/scripts/list-skills.sh github/awesome-copilot)",
+      "WebFetch(domain:skills.sh)",
+      "Bash(npx create-next-app@latest . --typescript --tailwind --eslint --app --src-dir --import-alias \"@/*\" --use-npm)",
+      "Bash(npx create-next-app@latest guzwa --typescript --tailwind --eslint --app --src-dir --import-alias \"@/*\" --use-npm)",
+      "Bash(npx shadcn@latest init -d --force)"
+    ]
+  }
+}
