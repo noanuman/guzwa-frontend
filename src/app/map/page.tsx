@@ -155,16 +155,33 @@ export default function MapPage() {
     if (hasJoinRequest) fetchPickupPoints();
   }, [user, activeRoute, notifications, fetchPickupPoints]);
 
-  // Show pulsing marker for pending requests from activeDriverRide
+  // Show pulsing marker for pending requests — from activeDriverRide or by fetching on notification
   useEffect(() => {
-    if (!activeDriverRide) { setPendingPickupPulse(null); return; }
-    const pending = activeDriverRide.pendingRequests.find((r) => r.status === "pending" && r.pickupLat && r.pickupLng);
-    if (pending) {
-      setPendingPickupPulse({ lat: pending.pickupLat, lng: pending.pickupLng });
-    } else {
-      setPendingPickupPulse(null);
+    if (activeDriverRide) {
+      const pending = activeDriverRide.pendingRequests.find((r) => r.status === "pending" && r.pickupLat && r.pickupLng);
+      if (pending) {
+        setPendingPickupPulse({ lat: pending.pickupLat, lng: pending.pickupLng });
+      } else {
+        setPendingPickupPulse(null);
+      }
+      return;
     }
-  }, [activeDriverRide]);
+    // Fallback: if not subscribed to ride, check via notifications + fetch
+    if (!user || !activeRoute) return;
+    const joinNotif = notifications.find((n) => n.type === "join_request");
+    if (!joinNotif) { setPendingPickupPulse(null); return; }
+    (async () => {
+      try {
+        const { getMyRides } = await import("@/lib/rides-store");
+        const rides = await getMyRides(user.uid);
+        const ride = rides.find((r) => r.status === "open" || r.status === "full");
+        if (ride) {
+          const pending = ride.pendingRequests.find((r) => r.status === "pending" && r.pickupLat && r.pickupLng);
+          if (pending) setPendingPickupPulse({ lat: pending.pickupLat, lng: pending.pickupLng });
+        }
+      } catch {}
+    })();
+  }, [activeDriverRide, user, activeRoute, notifications]);
 
   // Re-fetch pickup points when a new passenger is accepted (activeDriverRide changes)
   useEffect(() => {
