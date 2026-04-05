@@ -7,6 +7,7 @@ import {
   updateDoc,
   deleteDoc,
   getDoc,
+  setDoc,
   getDocs,
   query,
   where,
@@ -15,10 +16,70 @@ import {
   Timestamp,
   arrayUnion,
   arrayRemove,
+  increment,
   serverTimestamp,
   type Unsubscribe,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
+
+/* ------------------------------------------------------------------ */
+/*  Notifications                                                      */
+/* ------------------------------------------------------------------ */
+
+export interface RideNotification {
+  id: string;
+  userId: string;
+  type: "join_request" | "request_accepted" | "request_declined" | "ride_cancelled";
+  message: string;
+  rideId: string;
+  read: boolean;
+  createdAt: Timestamp;
+}
+
+async function sendNotification(userId: string, type: RideNotification["type"], message: string, rideId: string) {
+  await addDoc(collection(db, "notifications"), {
+    userId,
+    type,
+    message,
+    rideId,
+    read: false,
+    createdAt: serverTimestamp(),
+  });
+}
+
+export function subscribeToNotifications(
+  userId: string,
+  callback: (notifications: RideNotification[]) => void
+): Unsubscribe {
+  const q = query(
+    collection(db, "notifications"),
+    where("userId", "==", userId),
+    where("read", "==", false)
+  );
+  return onSnapshot(q, (snap) => {
+    const notifs = snap.docs
+      .map((d) => ({ id: d.id, ...d.data() } as RideNotification))
+      .sort((a, b) => (b.createdAt?.seconds ?? 0) - (a.createdAt?.seconds ?? 0));
+    callback(notifs);
+  }, (err) => {
+    console.error("Notifications subscription error:", err);
+    callback([]);
+  });
+}
+
+export async function markNotificationRead(notifId: string) {
+  await updateDoc(doc(db, "notifications", notifId), { read: true });
+}
+
+async function awardPoints(userId: string, points: number) {
+  const userRef = doc(db, "users", userId);
+  const snap = await getDoc(userRef);
+  if (snap.exists()) {
+    await updateDoc(userRef, { points: increment(points) });
+  } else {
+    await setDoc(userRef, { points });
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -250,6 +311,14 @@ export async function requestToJoin(
   };
 
   await updateDoc(ref, { pendingRequests: arrayUnion(request) });
+
+  // Notify driver
+  await sendNotification(
+    ride.driverId,
+    "join_request",
+    `${data.name} želi da se pridruži tvojoj vožnji`,
+    rideId
+  );
 }
 
 export async function acceptJoinRequest(
@@ -286,6 +355,17 @@ export async function acceptJoinRequest(
     updates.status = "full";
   }
   await updateDoc(ref, updates);
+
+  // Award 3 points to driver for giving a ride
+  await awardPoints(driverUserId, 3);
+
+  // Notify passenger they were accepted
+  await sendNotification(
+    requesterUid,
+    "request_accepted",
+    `Vozač ${ride.driverName} je prihvatio tvoj zahtev`,
+    rideId
+  );
 }
 
 export async function declineJoinRequest(
@@ -307,6 +387,14 @@ export async function declineJoinRequest(
   const updatedRequest = { ...request, status: "declined" as const };
   await updateDoc(ref, { pendingRequests: arrayRemove(request) });
   await updateDoc(ref, { pendingRequests: arrayUnion(updatedRequest) });
+
+  // Notify passenger they were declined
+  await sendNotification(
+    requesterUid,
+    "request_declined",
+    `Vozač je odbio tvoj zahtev za vožnju`,
+    rideId
+  );
 }
 
 export async function cancelRide(
@@ -318,6 +406,17 @@ export async function cancelRide(
   if (!snap.exists()) throw new Error("Ride not found");
   const ride = docToRide(snap);
   if (ride.driverId !== userId) throw new Error("Only the driver can cancel");
+
+  // Notify all passengers and pending requesters
+  for (const p of ride.passengers) {
+    await sendNotification(p.uid, "ride_cancelled", `Vožnja do ${ride.destinationName} je otkazana`, rideId);
+  }
+  for (const r of ride.pendingRequests) {
+    if (r.status === "pending") {
+      await sendNotification(r.uid, "ride_cancelled", `Vožnja do ${ride.destinationName} je otkazana`, rideId);
+    }
+  }
+
   await deleteDoc(ref);
 
   // Delete all driver's routes from backend Putanje so they can't be matched anymore
@@ -419,9 +518,11 @@ export function subscribeToRide(
   });
 }
 
-export async function getUserPoints(_userId: string): Promise<number> {
-  // Points system disabled for now
-  return 0;
+export async function getUserPoints(userId: string): Promise<number> {
+  const userRef = doc(db, "users", userId);
+  const snap = await getDoc(userRef);
+  if (!snap.exists()) return 0;
+  return snap.data()?.points ?? 0;
 }
 
 /* ------------------------------------------------------------------ */

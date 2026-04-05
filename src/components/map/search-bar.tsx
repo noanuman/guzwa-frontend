@@ -121,13 +121,12 @@ export function SearchWithAutocomplete({ onPlaceSelect, userPos, placeholder }: 
   return (
     <div ref={containerRef} className="relative w-[280px] sm:w-[320px]">
       <div className="relative">
-        <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/50" />
         <Input
           placeholder={placeholder ?? "Gde idete?"}
           value={search}
           onChange={(e) => handleInputChange(e.target.value)}
           onFocus={() => predictions.length > 0 && setShowResults(true)}
-          className="h-9 w-full rounded-lg border-border bg-background/95 pl-9 pr-8 shadow-sm backdrop-blur-sm transition-shadow focus:shadow-md"
+          className="h-9 w-full rounded-lg border-border bg-background/95 pr-8 shadow-sm backdrop-blur-sm transition-shadow focus:shadow-md"
         />
         {search && (
           <button

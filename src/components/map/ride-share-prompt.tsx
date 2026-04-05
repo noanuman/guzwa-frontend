@@ -107,6 +107,13 @@ export function RideSharePrompt({
     return d.toISOString().split("T")[0];
   })();
 
+  const isDateTimeInPast = () => {
+    const [year, month, day] = date.split("-").map(Number);
+    const [hours, minutes] = time.split(":").map(Number);
+    const selected = new Date(year, month - 1, day, hours, minutes);
+    return selected < new Date();
+  };
+
   // Subscribe to active ride for real-time join request updates (driver mode)
   useEffect(() => {
     if (!activeRideId) return;
@@ -402,10 +409,14 @@ export function RideSharePrompt({
               />
             </div>
 
+            {isDateTimeInPast() && (
+              <p className="text-xs text-red-500 text-center">Izabrano vreme je već prošlo</p>
+            )}
+
             <Button
               size="sm"
               className="w-full"
-              disabled={loading}
+              disabled={loading || isDateTimeInPast()}
               onClick={() => {
                 const [year, month, day] = date.split("-").map(Number);
                 const [hours, minutes] = time.split(":").map(Number);
@@ -461,9 +472,14 @@ export function RideSharePrompt({
               />
             </div>
 
+            {isDateTimeInPast() && (
+              <p className="text-xs text-red-500 text-center">Izabrano vreme je već prošlo</p>
+            )}
+
             <Button
               size="sm"
               className="w-full"
+              disabled={isDateTimeInPast()}
               onClick={() => setScreen("passenger-rides")}
             >
               Potvrdi termin

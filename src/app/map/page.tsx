@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { User, SlidersHorizontal, MapPin, X, Navigation, Train, Car, Clock, Locate, Bus, Footprints, ArrowLeft, ChevronRight, TramFront, Star, AlertTriangle } from "lucide-react";
+import { User, SlidersHorizontal, MapPin, X, Navigation, Train, Car, Clock, Locate, Bus, Footprints, ArrowLeft, ChevronRight, TramFront, Star, AlertTriangle, ParkingCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -24,7 +24,7 @@ import { MapRecenter } from "@/components/map/map-recenter";
 import { BottomBar } from "@/components/map/bottom-bar";
 import { RideSharePrompt } from "@/components/map/ride-share-prompt";
 import { PickupSelector } from "@/components/map/pickup-selector";
-import type { Ride } from "@/lib/rides-store";
+import { type Ride, type RideNotification as RideNotif, subscribeToNotifications } from "@/lib/rides-store";
 import { ProfileSheet } from "@/components/map/profile-sheet";
 import { RideNotification } from "@/components/map/ride-notification";
 import { CameraMarkers, type CameraData } from "@/components/map/camera-markers";
@@ -32,6 +32,8 @@ import { CameraPopover } from "@/components/map/camera-popover";
 import { ReportProblemForm } from "@/components/map/report-problem";
 import { ProblemMarkers } from "@/components/map/problem-markers";
 import { ReportPinDrop } from "@/components/map/report-pin-drop";
+import { ParkingMarkers } from "@/components/map/parking-markers";
+import { ParkingForm } from "@/components/map/parking-form";
 import { useAuth } from "@/lib/auth-context";
 
 
@@ -47,6 +49,8 @@ export default function MapPage() {
   const [showTransit, setShowTransit] = useState(false);
   const [activeTransitRoute, setActiveTransitRoute] = useState<TransitRoute | null>(null);
   const [relocating, setRelocating] = useState(false);
+  const [relocatingOrigin, setRelocatingOrigin] = useState(false);
+  const savedDestRef = useRef<SelectedPlace | null>(null);
   const [showRideSharePrompt, setShowRideSharePrompt] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [rideDestination, setRideDestination] = useState<SelectedPlace | null>(null);
@@ -58,17 +62,20 @@ export default function MapPage() {
   const [rideDestLng, setRideDestLng] = useState(0);
   const [pointsToast, setPointsToast] = useState(false);
   const [cancelledNotification, setCancelledNotification] = useState<string | null>(null);
-  const [activeFilters, setActiveFilters] = useState<Set<string>>(new Set(["cameras"]));
+  const [activeFilters, setActiveFilters] = useState<Set<string>>(new Set(["cameras", "problems", "parking"]));
   const [activeCamera, setActiveCamera] = useState<CameraData | null>(null);
   const [customOrigin, setCustomOrigin] = useState<SelectedPlace | null>(null);
   const [customOriginCoords, setCustomOriginCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [reportingProblem, setReportingProblem] = useState(false);
   const [reportPinLocation, setReportPinLocation] = useState<{ lat: number; lng: number } | null>(null);
+  const [postingParking, setPostingParking] = useState(false);
+  const [parkingPinLocation, setParkingPinLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [driverRoutePath, setDriverRoutePath] = useState<{ lat: number; lng: number }[]>([]);
   const [pickupSelectorRoute, setPickupSelectorRoute] = useState<{ lat: number; lng: number }[] | null>(null);
   const pickupSelectorCallbackRef = useRef<((lat: number, lng: number) => void) | null>(null);
   const [activeDriverRide, setActiveDriverRide] = useState<Ride | null>(null);
   const [backendPickupPoints, setBackendPickupPoints] = useState<{ lat: number; lng: number; label: string }[]>([]);
+  const [notifications, setNotifications] = useState<RideNotif[]>([]);
   const recenterRef = useRef<(() => void) | null>(null);
   const userLocation = useUserLocation();
 
@@ -94,6 +101,13 @@ export default function MapPage() {
     return t;
   };
 
+  // Subscribe to notifications
+  useEffect(() => {
+    if (!user) return;
+    const unsub = subscribeToNotifications(user.uid, setNotifications);
+    return unsub;
+  }, [user]);
+
   // Always track user location
   useEffect(() => {
     userLocation.startWatching();
@@ -101,35 +115,39 @@ export default function MapPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Fetch backend Putanje pickup points once when driver has active route
-  const pickupFetchedRef = useRef(false);
-  useEffect(() => {
-    if (!user || !activeRoute) {
-      pickupFetchedRef.current = false;
-      return;
-    }
-    if (pickupFetchedRef.current) return;
-    pickupFetchedRef.current = true;
-
-    (async () => {
-      try {
-        const resp = await fetch(
-          `${process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:5000"}/api/putanje/vozac/${user.uid}`
-        );
-        const routes = await resp.json();
-        const points: { lat: number; lng: number; label: string }[] = [];
-        for (const r of routes) {
-          if (r.pairPoint && r.idPair) {
-            const [lat, lng] = r.pairPoint.split(", ").map(Number);
-            if (!isNaN(lat) && !isNaN(lng)) {
-              points.push({ lat, lng, label: "" });
-            }
+  // Fetch backend Putanje pickup points when driver has active route
+  // Re-fetch when notifications change (new join request = someone picked a point)
+  const fetchPickupPoints = useCallback(async () => {
+    if (!user) return;
+    try {
+      const resp = await fetch(
+        `${process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:5000"}/api/putanje/vozac/${user.uid}`
+      );
+      const routes = await resp.json();
+      const points: { lat: number; lng: number; label: string }[] = [];
+      for (const r of routes) {
+        if (r.pairPoint && r.idPair) {
+          const [lat, lng] = r.pairPoint.split(", ").map(Number);
+          if (!isNaN(lat) && !isNaN(lng)) {
+            points.push({ lat, lng, label: "" });
           }
         }
-        setBackendPickupPoints(points);
-      } catch { /* backend unavailable */ }
-    })();
-  }, [user, activeRoute]);
+      }
+      setBackendPickupPoints(points);
+    } catch { /* backend unavailable */ }
+  }, [user]);
+
+  useEffect(() => {
+    if (!user || !activeRoute) return;
+    fetchPickupPoints();
+  }, [user, activeRoute, fetchPickupPoints]);
+
+  // Re-fetch when a new join_request notification arrives
+  useEffect(() => {
+    if (!user || !activeRoute) return;
+    const hasJoinRequest = notifications.some((n) => n.type === "join_request");
+    if (hasJoinRequest) fetchPickupPoints();
+  }, [user, activeRoute, notifications, fetchPickupPoints]);
 
   // Re-fetch pickup points when a new passenger is accepted (activeDriverRide changes)
   useEffect(() => {
@@ -395,6 +413,75 @@ export default function MapPage() {
             }
           }
 
+          // Chain times: each step starts when the previous one ends
+          // Parse duration string to minutes
+          const parseDurMins = (d: string): number => {
+            const hm = d.match(/(\d+)\s*h\s*(\d+)/);
+            if (hm) return parseInt(hm[1]) * 60 + parseInt(hm[2]);
+            const m = d.match(/(\d+)/);
+            return m ? parseInt(m[1]) : 0;
+          };
+          const parseTimeMin = (t: string): number => {
+            if (!t) return -1;
+            const m24 = t.match(/^(\d{1,2}):(\d{2})$/);
+            if (m24) return parseInt(m24[1]) * 60 + parseInt(m24[2]);
+            const m12 = t.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+            if (m12) {
+              let h = parseInt(m12[1]);
+              if (m12[3].toUpperCase() === "PM" && h !== 12) h += 12;
+              if (m12[3].toUpperCase() === "AM" && h === 12) h = 0;
+              return h * 60 + parseInt(m12[2]);
+            }
+            return -1;
+          };
+          const minToStr = (m: number): string => {
+            const h = Math.floor(m / 60) % 24;
+            const mm = m % 60;
+            return `${String(h).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+          };
+
+          // Find anchor: first transit step with a departure time (from the train leg, which has reliable times)
+          const trainStep = steps.find((s) => s.type === "TRANSIT" && s.vehicleType === "TRAIN" && s.departureTime);
+          let cursor = -1; // current time in minutes
+
+          if (trainStep) {
+            // Work backwards from train departure to fix first_mile times
+            const trainDepMin = parseTimeMin(trainStep.departureTime!);
+            const trainIdx = steps.indexOf(trainStep);
+
+            // Set cursor at train departure, walk backwards
+            let backCursor = trainDepMin;
+            for (let i = trainIdx - 1; i >= 0; i--) {
+              const s = steps[i];
+              const durMin = parseDurMins(s.duration);
+              if (s.type === "TRANSIT") {
+                const arrMin = backCursor;
+                const depMin = arrMin - durMin;
+                s.departureTime = minToStr(depMin);
+                s.arrivalTime = minToStr(arrMin);
+                backCursor = depMin;
+              } else {
+                backCursor -= durMin;
+              }
+            }
+
+            // Work forwards from train arrival to fix last_mile times
+            const trainArrMin = parseTimeMin(trainStep.arrivalTime ?? "");
+            cursor = trainArrMin >= 0 ? trainArrMin : trainDepMin + parseDurMins(trainStep.duration);
+
+            for (let i = trainIdx + 1; i < steps.length; i++) {
+              const s = steps[i];
+              const durMin = parseDurMins(s.duration);
+              if (s.type === "TRANSIT") {
+                s.departureTime = minToStr(cursor);
+                cursor += durMin;
+                s.arrivalTime = minToStr(cursor);
+              } else {
+                cursor += durMin;
+              }
+            }
+          }
+
           // Helper: parse time string in either "HH:MM" (24h) or "H:MM AM/PM" (12h) to a Date
           const parseTimeToDate = (timeStr: string): Date | null => {
             if (!timeStr) return null;
@@ -525,13 +612,20 @@ export default function MapPage() {
         {/* Search bar — hidden when overlay is open */}
         {!selectedPlace && !relocating && (
           <div style={{ top: 18 }} className="absolute left-1/2 z-[1000] flex -translate-x-1/2 items-center gap-3 animate-in fade-in slide-in-from-top-2 duration-500">
-            <Button size="icon" className="rounded-full" onClick={() => setProfileOpen(true)}>
-              {user?.photoURL ? (
-                <img src={user.photoURL} alt="" className="h-full w-full rounded-full object-cover" />
-              ) : (
-                <User />
+            <div className="relative">
+              <Button size="icon" className="rounded-full" onClick={() => setProfileOpen(true)}>
+                {user?.photoURL ? (
+                  <img src={user.photoURL} alt="" className="h-full w-full rounded-full object-cover" />
+                ) : (
+                  <User />
+                )}
+              </Button>
+              {notifications.length > 0 && (
+                <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[9px] font-bold text-white">
+                  {notifications.length}
+                </span>
               )}
-            </Button>
+            </div>
 
             <SearchWithAutocomplete onPlaceSelect={setSelectedPlace} userPos={userLocation.location} />
 
@@ -547,7 +641,7 @@ export default function MapPage() {
                       key={f.id}
                       variant="outline"
                       size="sm"
-                      className="gap-2 rounded-full"
+                      className={`gap-2 rounded-full transition-all ${activeFilters.has(f.id) ? "border-foreground text-foreground" : "opacity-35"}`}
                       pressed={activeFilters.has(f.id)}
                       onPressedChange={(pressed) => {
                         setActiveFilters((prev) => {
@@ -583,41 +677,19 @@ export default function MapPage() {
               <Card className="border-0 shadow-sm">
                 <CardContent className="space-y-2 py-3">
                   {/* Origin */}
-                  <div className="flex items-center gap-3">
+                  <div
+                    className="flex items-center gap-3 cursor-pointer"
+                    onClick={() => { savedDestRef.current = selectedPlace; setSelectedPlace(null); setRelocatingOrigin(true); }}
+                  >
                     <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-100">
-                      <MapPin className="h-4 w-4 text-emerald-600" />
+                      <Navigation className="h-4 w-4 text-emerald-600" />
                     </div>
-                    {customOrigin ? (
-                      <div className="min-w-0 flex-1 flex items-center gap-2">
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs text-muted-foreground">Od</p>
-                          <p className="truncate text-sm font-medium">{customOrigin.name}</p>
-                        </div>
-                        <Button variant="ghost" size="icon-xs" onClick={() => { setCustomOrigin(null); setCustomOriginCoords(null); }}>
-                          <X className="h-3 w-3" />
-                        </Button>
-                      </div>
-                    ) : (
-                      <div className="min-w-0 flex-1">
-                        <p className="text-xs text-muted-foreground">Od</p>
-                        <SearchWithAutocomplete
-                          onPlaceSelect={(place) => {
-                            setCustomOrigin(place);
-                            const geocoder = new google.maps.Geocoder();
-                            geocoder.geocode({ placeId: place.placeId }, (results, status) => {
-                              if (status === "OK" && results?.[0]) {
-                                setCustomOriginCoords({
-                                  lat: results[0].geometry.location.lat(),
-                                  lng: results[0].geometry.location.lng(),
-                                });
-                              }
-                            });
-                          }}
-                          userPos={userLocation.location}
-                          placeholder="Trenutna lokacija"
-                        />
-                      </div>
-                    )}
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs text-muted-foreground">Od</p>
+                      <p className="truncate text-sm font-medium">{customOrigin?.name ?? "Trenutna lokacija"}</p>
+                      {customOrigin && <p className="truncate text-xs text-muted-foreground">{customOrigin.address}</p>}
+                    </div>
+                    <ChevronRight className="h-4 w-4 text-muted-foreground" />
                   </div>
 
                   <Separator />
@@ -628,7 +700,7 @@ export default function MapPage() {
                     onClick={() => { setSelectedPlace(null); setRelocating(true); }}
                   >
                     <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-100">
-                      <Navigation className="h-4 w-4 text-blue-600" />
+                      <MapPin className="h-4 w-4 text-blue-600" />
                     </div>
                     <div className="min-w-0 flex-1">
                       <p className="text-xs text-muted-foreground">Do</p>
@@ -640,99 +712,86 @@ export default function MapPage() {
                 </CardContent>
               </Card>
 
-              {/* Service cards — Yandex Go style */}
-              <div className="grid grid-cols-2 gap-3">
-                {/* Navigation */}
-                <Card
-                  className="cursor-pointer overflow-hidden border-0 shadow-sm transition-all duration-200 hover:shadow-md hover:-translate-y-0.5 active:scale-[0.98]"
-                  onClick={handleNavigate}
-                >
-                  <CardContent className="p-0">
-                    <div className="flex h-24 items-end justify-center rounded-t-xl bg-gradient-to-br from-orange-50 to-amber-100">
-                      <div className="mb-2 flex h-14 w-14 items-center justify-center rounded-2xl bg-white shadow-sm">
-                        <Navigation className="h-7 w-7 text-primary" />
+              {/* Service cards */}
+              <div className="grid grid-cols-[1fr_1.2fr] gap-3">
+                {/* Left column */}
+                <div className="flex flex-col gap-3">
+                  <Card
+                    className="cursor-pointer border-0 shadow-sm transition-all hover:shadow-md hover:-translate-y-0.5 active:scale-[0.98]"
+                    onClick={handleNavigate}
+                  >
+                    <CardContent className="flex items-center gap-3 px-4 py-4">
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-orange-50">
+                        <Navigation className="h-5 w-5 text-primary" />
                       </div>
-                    </div>
-                    <div className="px-3 py-2.5 text-center">
                       <p className="text-sm font-semibold">Navigacija</p>
-                    </div>
-                  </CardContent>
-                </Card>
+                    </CardContent>
+                  </Card>
 
-                {/* Public transport */}
-                <Card
-                  className="cursor-pointer overflow-hidden border-0 shadow-sm transition-all duration-200 hover:shadow-md hover:-translate-y-0.5 active:scale-[0.98]"
-                  onClick={handleTransit}
-                >
-                  <CardContent className="p-0">
-                    <div className="flex h-24 items-end justify-center rounded-t-xl bg-gradient-to-br from-blue-50 to-indigo-100">
-                      <div className="mb-2 flex h-14 w-14 items-center justify-center rounded-2xl bg-white shadow-sm">
-                        <Train className="h-7 w-7 text-blue-600" />
+                  <Card
+                    className="cursor-pointer border-0 shadow-sm transition-all hover:shadow-md hover:-translate-y-0.5 active:scale-[0.98]"
+                    onClick={handleTransit}
+                  >
+                    <CardContent className="flex items-center gap-3 px-4 py-4">
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50">
+                        <Train className="h-5 w-5 text-blue-600" />
                       </div>
-                    </div>
-                    <div className="px-3 py-2.5 text-center">
                       <p className="text-sm font-semibold">Javni prevoz</p>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                {/* Right column: Car sharing */}
+                <Card
+                  className="cursor-pointer border-0 shadow-sm transition-all hover:shadow-md hover:-translate-y-0.5 active:scale-[0.98]"
+                  onClick={async () => {
+                    if (!selectedPlace) return;
+                    try {
+                      const dest = { ...selectedPlace };
+                      let origin: { lat: number; lng: number };
+                      let oName: string;
+                      let oAddr: string;
+
+                      if (customOrigin && customOriginCoords) {
+                        origin = customOriginCoords;
+                        oName = customOrigin.name;
+                        oAddr = customOrigin.address;
+                      } else {
+                        const loc = await userLocation.request();
+                        origin = loc;
+                        oName = "Trenutna lokacija";
+                        oAddr = `${loc.lat.toFixed(4)}, ${loc.lng.toFixed(4)}`;
+                      }
+
+                      setActiveRoute({ origin, destinationPlaceId: dest.placeId });
+                      userLocation.startWatching();
+                      setRideDestination(dest);
+                      setRideOriginName(oName);
+                      setRideOriginAddress(oAddr);
+                      setRideOriginLat(origin.lat);
+                      setRideOriginLng(origin.lng);
+                      const geocoder = new google.maps.Geocoder();
+                      geocoder.geocode({ placeId: dest.placeId }, (results, status) => {
+                        if (status === "OK" && results?.[0]) {
+                          setRideDestLat(results[0].geometry.location.lat());
+                          setRideDestLng(results[0].geometry.location.lng());
+                        }
+                      });
+                      setSelectedPlace(null);
+                      setCustomOrigin(null);
+                      setCustomOriginCoords(null);
+                      setShowRideSharePrompt(true);
+                    } catch { /* geolocation failed */ }
+                  }}
+                >
+                  <CardContent className="flex h-full flex-col items-center justify-center gap-2 p-4">
+                    <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-50">
+                      <Car className="h-6 w-6 text-emerald-600" />
                     </div>
+                    <p className="text-sm font-semibold">Podeli vožnju</p>
                   </CardContent>
                 </Card>
               </div>
-
-              {/* Car sharing — wide card */}
-              <Card
-                className="cursor-pointer overflow-hidden border-0 shadow-sm transition-all duration-200 hover:shadow-md hover:-translate-y-0.5 active:scale-[0.98]"
-                onClick={async () => {
-                  if (!selectedPlace) return;
-                  try {
-                    const dest = { ...selectedPlace };
-                    let origin: { lat: number; lng: number };
-                    let oName: string;
-                    let oAddr: string;
-
-                    if (customOrigin && customOriginCoords) {
-                      origin = customOriginCoords;
-                      oName = customOrigin.name;
-                      oAddr = customOrigin.address;
-                    } else {
-                      const loc = await userLocation.request();
-                      origin = loc;
-                      oName = "Trenutna lokacija";
-                      oAddr = `${loc.lat.toFixed(4)}, ${loc.lng.toFixed(4)}`;
-                    }
-
-                    setActiveRoute({ origin, destinationPlaceId: dest.placeId });
-                    userLocation.startWatching();
-                    setRideDestination(dest);
-                    setRideOriginName(oName);
-                    setRideOriginAddress(oAddr);
-                    setRideOriginLat(origin.lat);
-                    setRideOriginLng(origin.lng);
-                    const geocoder = new google.maps.Geocoder();
-                    geocoder.geocode({ placeId: dest.placeId }, (results, status) => {
-                      if (status === "OK" && results?.[0]) {
-                        setRideDestLat(results[0].geometry.location.lat());
-                        setRideDestLng(results[0].geometry.location.lng());
-                      }
-                    });
-                    setSelectedPlace(null);
-                    setCustomOrigin(null);
-                    setCustomOriginCoords(null);
-                    setShowRideSharePrompt(true);
-                  } catch { /* geolocation failed */ }
-                }}
-              >
-                <CardContent className="flex items-center gap-4 p-0">
-                  <div className="flex h-20 w-24 shrink-0 items-center justify-center rounded-l-xl bg-gradient-to-br from-emerald-50 to-teal-100">
-                    <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white shadow-sm">
-                      <Car className="h-6 w-6 text-emerald-600" />
-                    </div>
-                  </div>
-                  <div className="flex-1 py-3 pr-4">
-                    <p className="text-sm font-semibold">Podeli vožnju</p>
-                    <p className="mt-0.5 text-xs text-muted-foreground">3 vozača na istoj ruti</p>
-                  </div>
-                  <ChevronRight className="mr-4 h-4 w-4 text-muted-foreground" />
-                </CardContent>
-              </Card>
 
             </div>
           </div>
@@ -1055,6 +1114,7 @@ export default function MapPage() {
           open={profileOpen}
           onClose={() => setProfileOpen(false)}
           onRideCancelled={handleRideCancelled}
+          notifications={notifications}
           onSelectRide={(ride) => {
             // Start navigation to the ride's destination
             if (!userLocation.location) {
@@ -1091,7 +1151,7 @@ export default function MapPage() {
           <MapStyler />
           <DroppablePin
             onPlaceSelect={setSelectedPlace}
-            enabled={!selectedPlace && !activeRoute && !activeTransitRoute && !showTransit && !relocating && !reportingProblem}
+            enabled={!selectedPlace && !activeRoute && !activeTransitRoute && !showTransit && !relocating && !reportingProblem && !postingParking}
           />
           {relocating && (
             <RelocateOverlay
@@ -1104,6 +1164,28 @@ export default function MapPage() {
                 setSelectedPlace(place);
               }}
               onCancel={() => setRelocating(false)}
+            />
+          )}
+          {relocatingOrigin && (
+            <RelocateOverlay
+              onConfirm={(place) => {
+                setRelocatingOrigin(false);
+                setCustomOrigin(place);
+                const geocoder = new google.maps.Geocoder();
+                geocoder.geocode({ placeId: place.placeId }, (results, status) => {
+                  if (status === "OK" && results?.[0]) {
+                    setCustomOriginCoords({
+                      lat: results[0].geometry.location.lat(),
+                      lng: results[0].geometry.location.lng(),
+                    });
+                  }
+                });
+                setSelectedPlace(savedDestRef.current);
+              }}
+              onCancel={() => {
+                setRelocatingOrigin(false);
+                setSelectedPlace(savedDestRef.current);
+              }}
             />
           )}
           <MapRecenter userPos={userLocation.location} recenterRef={recenterRef} />
@@ -1134,10 +1216,16 @@ export default function MapPage() {
             onCameraClick={setActiveCamera}
           />
           <ProblemMarkers visible={activeFilters.has("problems") && !pickupSelectorRoute} />
+          <ParkingMarkers visible={activeFilters.has("parking") && !pickupSelectorRoute} />
           <ReportPinDrop
             active={reportingProblem && !pickupSelectorRoute}
             pinPlaced={!!reportPinLocation}
             onPinDrop={(lat, lng) => setReportPinLocation({ lat, lng })}
+          />
+          <ReportPinDrop
+            active={postingParking && !pickupSelectorRoute}
+            pinPlaced={!!parkingPinLocation}
+            onPinDrop={(lat, lng) => setParkingPinLocation({ lat, lng })}
           />
         </GoogleMap>
 
@@ -1146,15 +1234,24 @@ export default function MapPage() {
           <CameraPopover camera={activeCamera} onClose={() => setActiveCamera(null)} />
         )}
 
-        {/* Report problem button */}
-        {!reportingProblem && !reportPinLocation && !selectedPlace && !relocating && !showTransit && !activeTransitRoute && !activeRoute && (
-          <Button
-            size="icon"
-            className="fixed bottom-20 right-4 z-[1000] h-12 w-12 rounded-full bg-amber-500 shadow-xl shadow-amber-500/25 hover:bg-amber-600 hover:shadow-amber-500/40 transition-all hover:-translate-y-0.5 active:scale-95"
-            onClick={() => setReportingProblem(true)}
-          >
-            <AlertTriangle className="h-5 w-5 text-white" />
-          </Button>
+        {/* Action buttons — report problem + post parking */}
+        {!reportingProblem && !reportPinLocation && !postingParking && !parkingPinLocation && !selectedPlace && !relocating && !showTransit && !activeTransitRoute && !activeRoute && (
+          <div className="fixed bottom-6 right-4 z-[1000] flex flex-col gap-3">
+            <Button
+              size="icon"
+              className="h-12 w-12 rounded-full bg-blue-500 shadow-xl shadow-blue-500/25 hover:bg-blue-600 hover:shadow-blue-500/40 transition-all hover:-translate-y-0.5 active:scale-95"
+              onClick={() => setPostingParking(true)}
+            >
+              <ParkingCircle className="h-5 w-5 text-white" />
+            </Button>
+            <Button
+              size="icon"
+              className="h-12 w-12 rounded-full bg-amber-500 shadow-xl shadow-amber-500/25 hover:bg-amber-600 hover:shadow-amber-500/40 transition-all hover:-translate-y-0.5 active:scale-95"
+              onClick={() => setReportingProblem(true)}
+            >
+              <AlertTriangle className="h-5 w-5 text-white" />
+            </Button>
+          </div>
         )}
 
         {/* Pin-drop mode message */}
@@ -1184,6 +1281,37 @@ export default function MapPage() {
             onSubmitted={() => {
               setReportPinLocation(null);
               setReportingProblem(false);
+            }}
+          />
+        )}
+
+        {/* Parking pin-drop mode message */}
+        {postingParking && !parkingPinLocation && (
+          <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[1100]">
+            <Card className="shadow-xl">
+              <CardContent className="flex items-center gap-3 py-3">
+                <ParkingCircle className="h-4 w-4 text-blue-500 shrink-0" />
+                <p className="text-sm font-medium">Postavi pin gde je parking</p>
+                <Button variant="ghost" size="icon-xs" onClick={() => setPostingParking(false)}>
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
+        {/* Parking form after pin is placed */}
+        {parkingPinLocation && (
+          <ParkingForm
+            lat={parkingPinLocation.lat}
+            lng={parkingPinLocation.lng}
+            onClose={() => {
+              setParkingPinLocation(null);
+              setPostingParking(false);
+            }}
+            onSubmitted={() => {
+              setParkingPinLocation(null);
+              setPostingParking(false);
             }}
           />
         )}

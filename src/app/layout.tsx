@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
-import { Agentation } from "agentation";
 import { AuthProvider } from "@/lib/auth-context";
 import "./globals.css";
 
@@ -22,11 +21,11 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="sr-Latn" className={`${inter.variable} h-full antialiased`}>
-      <body className="min-h-full flex flex-col font-sans">
+      <body className="min-h-full flex flex-col font-sans" suppressHydrationWarning>
         <AuthProvider>
           {children}
         </AuthProvider>
-        {process.env.NODE_ENV === "development" && <Agentation />}
+
       </body>
     </html>
   );

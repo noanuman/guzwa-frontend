@@ -138,3 +138,36 @@
 .gm-style div {
   font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif !important;
 }
+
+/* Clean up InfoWindow padding and close button */
+.gm-style .gm-style-iw-c {
+  padding: 10px 12px 12px !important;
+  border-radius: 12px !important;
+}
+.gm-style .gm-style-iw-d {
+  overflow: auto !important;
+  max-height: none !important;
+}
+.gm-style-iw-chr {
+  position: absolute !important;
+  top: 8px !important;
+  right: 8px !important;
+  z-index: 1 !important;
+  height: auto !important;
+  width: auto !important;
+}
+.gm-style-iw-chr button {
+  width: 22px !important;
+  height: 22px !important;
+  background: transparent !important;
+  border-radius: 50% !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+.gm-style-iw-chr button span {
+  margin: 0 !important;
+  filter: none !important;
+  width: 12px !important;
+  height: 12px !important;
+}

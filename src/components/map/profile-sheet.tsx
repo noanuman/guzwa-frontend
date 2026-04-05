@@ -13,6 +13,7 @@ import {
   UserCircle,
   Loader2,
   Navigation,
+  Bell,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -27,6 +28,8 @@ import {
   leaveRide,
   subscribeToRide,
   type Ride,
+  type RideNotification,
+  markNotificationRead,
 } from "@/lib/rides-store";
 
 interface ProfileSheetProps {
@@ -35,11 +38,12 @@ interface ProfileSheetProps {
   onRideCancelled?: (destination: string) => void;
   onSelectRide?: (ride: Ride) => void;
   onNavigationStop?: () => void;
+  notifications?: RideNotification[];
 }
 
-type Tab = "my-rides" | "joined" | "points";
+type Tab = "my-rides" | "joined" | "points" | "notifications";
 
-export function ProfileSheet({ open, onClose, onRideCancelled, onSelectRide, onNavigationStop }: ProfileSheetProps) {
+export function ProfileSheet({ open, onClose, onRideCancelled, onSelectRide, onNavigationStop, notifications = [] }: ProfileSheetProps) {
   const { user, signInWithGoogle, signOut } = useAuth();
   const [tab, setTab] = useState<Tab>("my-rides");
   const [myRides, setMyRides] = useState<Ride[]>([]);
@@ -181,6 +185,7 @@ export function ProfileSheet({ open, onClose, onRideCancelled, onSelectRide, onN
     { key: "my-rides", label: "Moje vožnje" },
     { key: "joined", label: "Pridružene" },
     { key: "points", label: "Bodovi" },
+    { key: "notifications", label: `Obaveštenja${notifications.length > 0 ? ` (${notifications.length})` : ""}` },
   ];
 
   const renderRideCard = (ride: Ride, type: "driver" | "passenger") => (
@@ -435,27 +440,19 @@ export function ProfileSheet({ open, onClose, onRideCancelled, onSelectRide, onN
                             <Star className="h-4 w-4 text-primary" />
                           </div>
                           <div>
-                            <p className="text-sm font-medium">
-                              Ponudi vožnju = 10 bodova
-                            </p>
-                            <p className="text-xs text-muted-foreground">
-                              Deli vožnje sa drugima i sakupljaj bodove
-                            </p>
+                            <p className="text-sm font-medium">Ponudi vožnju = 3 boda</p>
+                            <p className="text-xs text-muted-foreground">Deli vožnje sa drugima</p>
                           </div>
                         </CardContent>
                       </Card>
                       <Card className="border-0 shadow-sm">
                         <CardContent className="flex items-center gap-3 py-3">
                           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-500/10">
-                            <Users className="h-4 w-4 text-emerald-500" />
+                            <MapPin className="h-4 w-4 text-emerald-500" />
                           </div>
                           <div>
-                            <p className="text-sm font-medium">
-                              Pridruži se vožnji = 10 bodova
-                            </p>
-                            <p className="text-xs text-muted-foreground">
-                              Pridruži se vozaču i uštedi na gorivu
-                            </p>
+                            <p className="text-sm font-medium">Prijavi problem = 1 bod</p>
+                            <p className="text-xs text-muted-foreground">Ako 3 korisnika potvrde</p>
                           </div>
                         </CardContent>
                       </Card>
@@ -465,16 +462,50 @@ export function ProfileSheet({ open, onClose, onRideCancelled, onSelectRide, onN
                             <Trophy className="h-4 w-4 text-amber-500" />
                           </div>
                           <div>
-                            <p className="text-sm font-medium">
-                              Bodovi = popusti i nagrade
-                            </p>
-                            <p className="text-xs text-muted-foreground">
-                              Koristi bodove za popuste na parking i vožnje
-                            </p>
+                            <p className="text-sm font-medium">Podeli parking = 3 boda</p>
+                            <p className="text-xs text-muted-foreground">Kad neko rezerviše tvoje mesto</p>
                           </div>
                         </CardContent>
                       </Card>
                     </div>
+                  </div>
+                )}
+
+                {tab === "notifications" && (
+                  <div className="space-y-2">
+                    {notifications.length === 0 && (
+                      <div className="flex flex-col items-center py-12 text-muted-foreground">
+                        <Bell className="h-8 w-8 mb-2 opacity-40" />
+                        <p className="text-sm">Nema novih obaveštenja</p>
+                      </div>
+                    )}
+                    {notifications.map((n) => (
+                      <Card key={n.id} className="border-0 shadow-sm">
+                        <CardContent className="flex items-start gap-3 py-3">
+                          <div className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${
+                            n.type === "join_request" ? "bg-blue-500" :
+                            n.type === "request_accepted" ? "bg-emerald-500" :
+                            n.type === "request_declined" ? "bg-amber-500" :
+                            "bg-red-500"
+                          }`} />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm">{n.message}</p>
+                            <p className="text-[10px] text-muted-foreground mt-0.5">
+                              {n.createdAt?.toDate?.()
+                                ? n.createdAt.toDate().toLocaleTimeString("sr-Latn", { hour: "2-digit", minute: "2-digit" })
+                                : ""}
+                            </p>
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            onClick={() => markNotificationRead(n.id)}
+                          >
+                            <X className="h-3 w-3" />
+                          </Button>
+                        </CardContent>
+                      </Card>
+                    ))}
                   </div>
                 )}
               </div>
