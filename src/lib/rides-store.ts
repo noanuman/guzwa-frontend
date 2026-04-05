@@ -29,14 +29,14 @@ import { db } from "@/lib/firebase";
 export interface RideNotification {
   id: string;
   userId: string;
-  type: "join_request" | "request_accepted" | "request_declined" | "ride_cancelled";
+  type: "join_request" | "request_accepted" | "request_declined" | "ride_cancelled" | "ride_available";
   message: string;
   rideId: string;
   read: boolean;
   createdAt: Timestamp;
 }
 
-async function sendNotification(userId: string, type: RideNotification["type"], message: string, rideId: string) {
+export async function sendNotification(userId: string, type: RideNotification["type"], message: string, rideId: string) {
   await addDoc(collection(db, "notifications"), {
     userId,
     type,
@@ -216,6 +216,90 @@ export async function createRide(
   return ref.id;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Ride requests (sharer waiting for a driver)                        */
+/* ------------------------------------------------------------------ */
+
+export interface RideRequest {
+  id: string;
+  userId: string;
+  userName: string;
+  originLat: number;
+  originLng: number;
+  destinationLat: number;
+  destinationLng: number;
+  destinationName: string;
+  date: string;
+  time: string;
+  createdAt: Timestamp;
+}
+
+const rideRequestsCol = () => collection(db, "ride_requests");
+
+export async function saveRideRequest(
+  userId: string,
+  data: {
+    userName: string;
+    originLat: number;
+    originLng: number;
+    destinationLat: number;
+    destinationLng: number;
+    destinationName: string;
+    date: string;
+    time: string;
+  }
+): Promise<string> {
+  // Remove any existing request from this user first
+  const existing = await getDocs(query(rideRequestsCol(), where("userId", "==", userId)));
+  for (const d of existing.docs) await deleteDoc(d.ref);
+
+  const ref = await addDoc(rideRequestsCol(), {
+    userId,
+    ...data,
+    createdAt: serverTimestamp(),
+  });
+  return ref.id;
+}
+
+export async function removeRideRequest(userId: string): Promise<void> {
+  const existing = await getDocs(query(rideRequestsCol(), where("userId", "==", userId)));
+  for (const d of existing.docs) await deleteDoc(d.ref);
+}
+
+/** Called by the driver after creating a ride — find waiting sharers nearby */
+export async function notifyWaitingSharers(
+  driverId: string,
+  driverName: string,
+  rideId: string,
+  destLat: number,
+  destLng: number
+): Promise<void> {
+  const snap = await getDocs(rideRequestsCol());
+  const R = 6371;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+
+  for (const d of snap.docs) {
+    const req = d.data();
+    if (req.userId === driverId) continue;
+
+    // Haversine check — within 3km of destination
+    const dLat = toRad(destLat - req.destinationLat);
+    const dLng = toRad(destLng - req.destinationLng);
+    const a = Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(req.destinationLat)) * Math.cos(toRad(destLat)) * Math.sin(dLng / 2) ** 2;
+    const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+    if (dist <= 3) {
+      await sendNotification(
+        req.userId,
+        "ride_available",
+        `Vozač ${driverName} nudi vožnju do ${req.destinationName}`,
+        rideId
+      );
+    }
+  }
+}
+
 export async function joinRide(
   rideId: string,
   userId: string,
@@ -358,6 +442,37 @@ export async function acceptJoinRequest(
 
   // Award 3 points to driver for giving a ride
   await awardPoints(driverUserId, 3);
+
+  // Confirm backend pairing with pickup point
+  if (request.pickupLat && request.pickupLng) {
+    try {
+      const resp = await fetch(
+        `${process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:5000"}/api/putanje/vozac/${driverUserId}`
+      );
+      const routes = await resp.json();
+      // Find a route that this passenger hasn't been paired to yet
+      const route = routes.find((r: Record<string, unknown>) => {
+        const paired = Array.isArray(r.idPair) ? r.idPair : (r.idPair ? [r.idPair] : []);
+        return !paired.includes(requesterUid);
+      });
+      if (route) {
+        await fetch(
+          `${process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:5000"}/api/potvrdiPar`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              putanjaId: route.id,
+              id_putnika: requesterUid,
+              datumPutnik: new Date().toISOString().split("T")[0],
+              pickupLat: request.pickupLat,
+              pickupLng: request.pickupLng,
+            }),
+          }
+        );
+      }
+    } catch { /* backend unavailable */ }
+  }
 
   // Notify passenger they were accepted
   await sendNotification(

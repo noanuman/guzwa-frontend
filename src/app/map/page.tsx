@@ -24,7 +24,7 @@ import { MapRecenter } from "@/components/map/map-recenter";
 import { BottomBar } from "@/components/map/bottom-bar";
 import { RideSharePrompt } from "@/components/map/ride-share-prompt";
 import { PickupSelector } from "@/components/map/pickup-selector";
-import { type Ride, type RideNotification as RideNotif, subscribeToNotifications } from "@/lib/rides-store";
+import { type Ride, type RideNotification as RideNotif, subscribeToNotifications, markNotificationRead } from "@/lib/rides-store";
 import { ProfileSheet } from "@/components/map/profile-sheet";
 import { RideNotification } from "@/components/map/ride-notification";
 import { CameraMarkers, type CameraData } from "@/components/map/camera-markers";
@@ -34,6 +34,9 @@ import { ProblemMarkers } from "@/components/map/problem-markers";
 import { ReportPinDrop } from "@/components/map/report-pin-drop";
 import { ParkingMarkers } from "@/components/map/parking-markers";
 import { ParkingForm } from "@/components/map/parking-form";
+import { JoinRequestToast } from "@/components/map/join-request-toast";
+import { RideAvailableToast } from "@/components/map/ride-available-toast";
+import { PulsingPickupMarker } from "@/components/map/pulsing-pickup-marker";
 import { useAuth } from "@/lib/auth-context";
 
 
@@ -76,6 +79,7 @@ export default function MapPage() {
   const [activeDriverRide, setActiveDriverRide] = useState<Ride | null>(null);
   const [backendPickupPoints, setBackendPickupPoints] = useState<{ lat: number; lng: number; label: string }[]>([]);
   const [notifications, setNotifications] = useState<RideNotif[]>([]);
+  const [pendingPickupPulse, setPendingPickupPulse] = useState<{ lat: number; lng: number } | null>(null);
   const recenterRef = useRef<(() => void) | null>(null);
   const userLocation = useUserLocation();
 
@@ -126,8 +130,10 @@ export default function MapPage() {
       const routes = await resp.json();
       const points: { lat: number; lng: number; label: string }[] = [];
       for (const r of routes) {
-        if (r.pairPoint && r.idPair) {
-          const [lat, lng] = r.pairPoint.split(", ").map(Number);
+        // pairPoint can be a string or array of strings
+        const pairPoints = Array.isArray(r.pairPoint) ? r.pairPoint : (r.pairPoint ? [r.pairPoint] : []);
+        for (const pp of pairPoints) {
+          const [lat, lng] = pp.split(", ").map(Number);
           if (!isNaN(lat) && !isNaN(lng)) {
             points.push({ lat, lng, label: "" });
           }
@@ -148,6 +154,17 @@ export default function MapPage() {
     const hasJoinRequest = notifications.some((n) => n.type === "join_request");
     if (hasJoinRequest) fetchPickupPoints();
   }, [user, activeRoute, notifications, fetchPickupPoints]);
+
+  // Show pulsing marker for pending requests from activeDriverRide
+  useEffect(() => {
+    if (!activeDriverRide) { setPendingPickupPulse(null); return; }
+    const pending = activeDriverRide.pendingRequests.find((r) => r.status === "pending" && r.pickupLat && r.pickupLng);
+    if (pending) {
+      setPendingPickupPulse({ lat: pending.pickupLat, lng: pending.pickupLng });
+    } else {
+      setPendingPickupPulse(null);
+    }
+  }, [activeDriverRide]);
 
   // Re-fetch pickup points when a new passenger is accepted (activeDriverRide changes)
   useEffect(() => {
@@ -1080,6 +1097,11 @@ export default function MapPage() {
               pickupSelectorCallbackRef.current = null;
             }}
             onActiveRideUpdate={setActiveDriverRide}
+            onClearJoinNotifications={() => {
+              notifications.filter((n) => n.type === "join_request").forEach((n) => {
+                markNotificationRead(n.id);
+              });
+            }}
             onNavigateToPickup={(lat, lng) => {
               // Close ride share prompt and start navigation to pickup point
               setShowRideSharePrompt(false);
@@ -1098,6 +1120,28 @@ export default function MapPage() {
             }}
           />
         )}
+
+        {/* Join request toast — shows when driver gets a new request outside of driver-active screen */}
+        {!showRideSharePrompt && notifications.filter((n) => n.type === "join_request").map((n) => (
+          <JoinRequestToast
+            key={n.id}
+            notification={n}
+            onHandled={fetchPickupPoints}
+            onPickupFound={(lat, lng) => setPendingPickupPulse({ lat, lng })}
+            onPickupClear={() => setPendingPickupPulse(null)}
+          />
+        ))}
+
+        {/* Ride available toast — shows when a sharer gets notified that a driver appeared */}
+        {notifications.filter((n) => n.type === "ride_available").map((n) => (
+          <RideAvailableToast
+            key={n.id}
+            notification={n}
+            onViewRide={() => {
+              setShowRideSharePrompt(true);
+            }}
+          />
+        ))}
 
         {/* Points toast */}
         {pointsToast && (
@@ -1217,6 +1261,9 @@ export default function MapPage() {
           />
           <ProblemMarkers visible={activeFilters.has("problems") && !pickupSelectorRoute} />
           <ParkingMarkers visible={activeFilters.has("parking") && !pickupSelectorRoute} />
+          {pendingPickupPulse && (
+            <PulsingPickupMarker lat={pendingPickupPulse.lat} lng={pendingPickupPulse.lng} />
+          )}
           <ReportPinDrop
             active={reportingProblem && !pickupSelectorRoute}
             pinPlaced={!!reportPinLocation}

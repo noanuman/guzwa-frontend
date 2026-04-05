@@ -484,6 +484,7 @@ export function ProfileSheet({ open, onClose, onRideCancelled, onSelectRide, onN
                         <CardContent className="flex items-start gap-3 py-3">
                           <div className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${
                             n.type === "join_request" ? "bg-blue-500" :
+                            n.type === "ride_available" ? "bg-emerald-500" :
                             n.type === "request_accepted" ? "bg-emerald-500" :
                             n.type === "request_declined" ? "bg-amber-500" :
                             "bg-red-500"

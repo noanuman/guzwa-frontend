@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Car,
   X,
@@ -25,8 +25,12 @@ import { useAuth } from "@/lib/auth-context";
 import {
   createRide,
   getAvailableRides,
+  getMyRides,
   requestToJoin,
   subscribeToRide,
+  sendNotification,
+  saveRideRequest,
+  notifyWaitingSharers,
   type Ride,
   type RequestToJoinData,
 } from "@/lib/rides-store";
@@ -52,6 +56,8 @@ interface RideSharePromptProps {
   onActiveRideUpdate?: (ride: Ride | null) => void;
   /** Called when passenger confirms pickup — navigate them to the pickup point */
   onNavigateToPickup?: (lat: number, lng: number) => void;
+  /** Called to mark join request notifications as read (when driver handles from popup) */
+  onClearJoinNotifications?: () => void;
 }
 
 type Screen = "choose" | "driver-schedule" | "driver-active" | "passenger-schedule" | "passenger-rides" | "pickup-select" | "backend-match-pickup";
@@ -78,6 +84,7 @@ export function RideSharePrompt({
   onClearPickupSelector,
   onActiveRideUpdate,
   onNavigateToPickup,
+  onClearJoinNotifications,
 }: RideSharePromptProps) {
   const { user, signInWithGoogle } = useAuth();
   const [screen, setScreen] = useState<Screen>("choose");
@@ -127,18 +134,51 @@ export function RideSharePrompt({
     };
   }, [activeRideId]);
 
+  // Subscribe to the ride we requested — detect when driver accepts/declines
+  const [requestedRideStatus, setRequestedRideStatus] = useState<"pending" | "accepted" | "declined" | null>(null);
+  const acceptedHandledRef = useRef(false);
+  useEffect(() => {
+    if (!requestSent || !user) return;
+    acceptedHandledRef.current = false;
+    const unsub = subscribeToRide(requestSent, (ride) => {
+      if (!ride) return;
+      const myRequest = ride.pendingRequests.find((r) => r.uid === user.uid);
+      const amPassenger = ride.passengers.some((p) => p.uid === user.uid);
+      if (amPassenger || myRequest?.status === "accepted") {
+        setRequestedRideStatus("accepted");
+        // Auto-close and navigate to pickup
+        if (!acceptedHandledRef.current) {
+          acceptedHandledRef.current = true;
+          const req = myRequest ?? ride.pendingRequests.find((r) => r.uid === user.uid);
+          if (req?.pickupLat && req?.pickupLng) {
+            onDismiss();
+            onNavigateToPickup?.(req.pickupLat, req.pickupLng);
+          }
+        }
+      } else if (myRequest?.status === "declined") {
+        setRequestedRideStatus("declined");
+      } else if (myRequest?.status === "pending") {
+        setRequestedRideStatus("pending");
+      }
+    });
+    return unsub;
+  }, [requestSent, user]);
+
   // Load available rides when switching to passenger rides screen
   useEffect(() => {
     if (screen !== "passenger-rides" || !destination || !user) return;
+    // Don't re-fetch if we already sent a request
+    if (requestSent) return;
     setRidesLoading(true);
     setBackendMatch(null);
 
-    // Firestore query for rides near destination (within 3km)
+    let foundRides = false;
+    let foundBackend = false;
+
     const firestorePromise = getAvailableRides(destinationLat, destinationLng, destination.placeId)
-      .then(setAvailableRides)
+      .then((rides) => { setAvailableRides(rides); if (rides.length > 0) foundRides = true; })
       .catch(() => setAvailableRides([]));
 
-    // Backend path-matching query
     const backendPromise = (async () => {
       if (!originLat || !originLng || !destinationLat || !destinationLng) return;
       try {
@@ -154,11 +194,26 @@ export function RideSharePrompt({
           }),
         });
         const data = await resp.json();
-        if (data.ok) setBackendMatch(data);
+        if (data.ok) { setBackendMatch(data); foundBackend = true; }
       } catch { /* backend unavailable */ }
     })();
 
-    Promise.all([firestorePromise, backendPromise]).finally(() => setRidesLoading(false));
+    Promise.all([firestorePromise, backendPromise]).finally(() => {
+      setRidesLoading(false);
+      // If no rides found, save request so driver can find us later
+      if (!foundRides && !foundBackend && destinationLat && destinationLng) {
+        saveRideRequest(user.uid, {
+          userName: user.displayName ?? "Anonimno",
+          originLat: originLat ?? 0,
+          originLng: originLng ?? 0,
+          destinationLat: destinationLat ?? 0,
+          destinationLng: destinationLng ?? 0,
+          destinationName: destination.name,
+          date,
+          time,
+        });
+      }
+    });
   }, [screen, destination, user, originLat, originLng, destinationLat, destinationLng, date, time]);
 
   const handleCreateRide = async (scheduledAt: Date) => {
@@ -199,6 +254,17 @@ export function RideSharePrompt({
         } catch {
           // Backend path posting failed — ride still created in Firestore
         }
+      }
+
+      // Notify waiting sharers that a ride is now available
+      if (destinationLat && destinationLng) {
+        notifyWaitingSharers(
+          user.uid,
+          user.displayName ?? "Anonimno",
+          rideId,
+          destinationLat,
+          destinationLng
+        );
       }
 
       setActiveRideId(rideId);
@@ -265,27 +331,18 @@ export function RideSharePrompt({
     });
   };
 
-  // Backend match pickup — auto-confirm on first tap
+  // Backend match pickup — send join request, wait for driver to accept
   const handleBackendPickup = useCallback(async (lat: number, lng: number) => {
     if (!backendMatch || !user || !destination) return;
     setPickupPoint({ lat, lng });
     setLoading(true);
     try {
-      await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:5000"}/api/potvrdiPar`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          putanjaId: backendMatch.id,
-          id_putnika: user.uid,
-          datumPutnik: date,
-          pickupLat: lat,
-          pickupLng: lng,
-        }),
-      });
-      const matchingRide = availableRides.find((r) => r.driverId === backendMatch.idVozaca);
-      if (matchingRide) {
+      // Find the driver's Firestore ride and send join request (pending)
+      const driverRides = await getMyRides(backendMatch.idVozaca);
+      const openRide = driverRides.find((r) => r.status === "open" || r.status === "full");
+      if (openRide) {
         try {
-          await requestToJoin(matchingRide.id, user.uid, {
+          await requestToJoin(openRide.id, user.uid, {
             name: user.displayName ?? "Anonimno",
             photo: user.photoURL ?? "",
             pickupName: "Izabrana tačka na ruti",
@@ -295,22 +352,36 @@ export function RideSharePrompt({
             destinationName: destination.name,
             destinationAddress: destination.address,
           });
-        } catch { /* ride may not exist in Firestore */ }
+          setRequestSent(openRide.id);
+        } catch {
+          await sendNotification(
+            backendMatch.idVozaca,
+            "join_request",
+            `${user.displayName ?? "Neko"} želi da se pridruži tvojoj vožnji`,
+            backendMatch.id
+          );
+        }
+      } else {
+        await sendNotification(
+          backendMatch.idVozaca,
+          "join_request",
+          `${user.displayName ?? "Neko"} želi da se pridruži tvojoj vožnji`,
+          backendMatch.id
+        );
       }
       onClearPickupSelector?.();
-      setScreen("choose");
+      setScreen("passenger-rides");
       setBackendMatch(null);
       setPickupPoint(null);
-      onNavigateToPickup?.(lat, lng);
     } catch (err) {
-      console.error("Failed to confirm pairing:", err);
+      console.error("Failed to send join request:", err);
     } finally {
       setLoading(false);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendMatch, user, destination, date, availableRides]);
+  }, [backendMatch, user, destination, date]);
 
-  // Firestore rides pickup — auto-confirm on first tap
+  // Firestore rides pickup — send join request, wait for driver to accept
   const handleFirestorePickup = useCallback(async (lat: number, lng: number) => {
     if (!selectedRideForPickup || !user || !destination) return;
     setPickupPoint({ lat, lng });
@@ -330,8 +401,7 @@ export function RideSharePrompt({
       onClearPickupSelector?.();
       setSelectedRideForPickup(null);
       setPickupPoint(null);
-      setScreen("choose");
-      onNavigateToPickup?.(lat, lng);
+      setScreen("passenger-rides");
     } catch (err) {
       console.error("Failed to request join:", err);
     } finally {
@@ -585,6 +655,7 @@ export function RideSharePrompt({
                               onClick={async () => {
                                 const { acceptJoinRequest } = await import("@/lib/rides-store");
                                 await acceptJoinRequest(activeRideId!, user.uid, req.uid);
+                                onClearJoinNotifications?.();
                               }}
                             >
                               <Check className="h-3 w-3" />
@@ -597,6 +668,7 @@ export function RideSharePrompt({
                               onClick={async () => {
                                 const { declineJoinRequest } = await import("@/lib/rides-store");
                                 await declineJoinRequest(activeRideId!, user.uid, req.uid);
+                                onClearJoinNotifications?.();
                               }}
                             >
                               <XCircle className="h-3 w-3" />
@@ -747,7 +819,7 @@ export function RideSharePrompt({
             <Separator />
 
             {/* Backend route match — accept or decline */}
-            {!ridesLoading && backendMatch && (
+            {!requestSent && !ridesLoading && backendMatch && (
               <Card className="border-emerald-200 bg-emerald-50/50">
                 <CardContent className="space-y-2 py-3">
                   <div className="flex items-center gap-2">
@@ -799,13 +871,54 @@ export function RideSharePrompt({
               </div>
             )}
 
-            {!ridesLoading && !backendMatch && availableRides.length === 0 && (
+            {requestSent && requestedRideStatus === "accepted" && (
+              <Card className="border-emerald-200 bg-emerald-50/50">
+                <CardContent className="flex flex-col items-center gap-2 py-6">
+                  <Check className="h-8 w-8 text-emerald-500" />
+                  <p className="text-sm font-medium">Vozač je prihvatio tvoj zahtev!</p>
+                  <p className="text-xs text-muted-foreground text-center">
+                    Idi do izabranog mesta preuzimanja i sačekaj vozača
+                  </p>
+                </CardContent>
+              </Card>
+            )}
+
+            {requestSent && requestedRideStatus === "declined" && (
+              <Card className="border-red-200 bg-red-50/50">
+                <CardContent className="flex flex-col items-center gap-2 py-6">
+                  <XCircle className="h-8 w-8 text-red-500" />
+                  <p className="text-sm font-medium">Vozač je odbio zahtev</p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="mt-2"
+                    onClick={() => { setRequestSent(null); setRequestedRideStatus(null); }}
+                  >
+                    Traži drugu vožnju
+                  </Button>
+                </CardContent>
+              </Card>
+            )}
+
+            {requestSent && (requestedRideStatus === "pending" || requestedRideStatus === null) && (
+              <Card className="border-amber-200 bg-amber-50/50">
+                <CardContent className="flex flex-col items-center gap-2 py-6">
+                  <Loader2 className="h-6 w-6 animate-spin text-amber-500" />
+                  <p className="text-sm font-medium">Zahtev poslat</p>
+                  <p className="text-xs text-muted-foreground text-center">
+                    Čeka se da vozač prihvati tvoj zahtev za pridruživanje
+                  </p>
+                </CardContent>
+              </Card>
+            )}
+
+            {!requestSent && !ridesLoading && !backendMatch && availableRides.length === 0 && (
               <p className="py-6 text-center text-sm text-muted-foreground">
                 Nema dostupnih vožnji za ovu destinaciju
               </p>
             )}
 
-            {!ridesLoading &&
+            {!requestSent && !ridesLoading &&
               availableRides.map((ride) => (
                 <Card
                   key={ride.id}
