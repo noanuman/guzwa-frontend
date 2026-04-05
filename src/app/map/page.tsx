@@ -155,21 +155,18 @@ export default function MapPage() {
     if (hasJoinRequest) fetchPickupPoints();
   }, [user, activeRoute, notifications, fetchPickupPoints]);
 
-  // Show pulsing marker for pending requests — from activeDriverRide or by fetching on notification
+  // Show pulsing marker for pending requests from activeDriverRide
   useEffect(() => {
-    if (activeDriverRide) {
-      const pending = activeDriverRide.pendingRequests.find((r) => r.status === "pending" && r.pickupLat && r.pickupLng);
-      if (pending) {
-        setPendingPickupPulse({ lat: pending.pickupLat, lng: pending.pickupLng });
-      } else {
-        setPendingPickupPulse(null);
-      }
-      return;
-    }
-    // Fallback: if not subscribed to ride, check via notifications + fetch
-    if (!user || !activeRoute) return;
+    if (!activeDriverRide) { setPendingPickupPulse(null); return; }
+    const pending = activeDriverRide.pendingRequests.find((r) => r.status === "pending" && r.pickupLat && r.pickupLng);
+    setPendingPickupPulse(pending ? { lat: pending.pickupLat, lng: pending.pickupLng } : null);
+  }, [activeDriverRide]);
+
+  // Fallback: fetch pickup from Firestore when join_request notification arrives and no activeDriverRide
+  useEffect(() => {
+    if (activeDriverRide || !user || !activeRoute) return;
     const joinNotif = notifications.find((n) => n.type === "join_request");
-    if (!joinNotif) { setPendingPickupPulse(null); return; }
+    if (!joinNotif) return;
     (async () => {
       try {
         const { getMyRides } = await import("@/lib/rides-store");
